@@ -1,0 +1,19 @@
+# Build outputs
+bot/bin/
+bot/obj/
+
+# Downloads directory
+downloads/
+
+# Config data (contains app state, not source)
+config/jackett/
+config/jellyfin/
+config/qbittorrent/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Misc
+*.odt
+.~lock.*

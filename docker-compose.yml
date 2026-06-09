@@ -1,0 +1,95 @@
+services:
+
+  flaresolverr:
+    image: ghcr.io/flaresolverr/flaresolverr:latest
+    container_name: media-flaresolverr
+    environment:
+      - LOG_LEVEL=info
+      - TZ=${TZ:-Europe/Moscow}
+    ports:
+      - "8191:8191"
+    restart: unless-stopped
+    networks:
+      - media
+
+  jackett:
+    image: lscr.io/linuxserver/jackett:latest
+    container_name: media-jackett
+    depends_on:
+      - flaresolverr
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=${TZ:-Europe/Moscow}
+    volumes:
+      - ./config/jackett:/config
+      - ./downloads:/downloads
+    ports:
+      - "9117:9117"
+    restart: unless-stopped
+    networks:
+      - media
+
+  qbittorrent:
+    image: lscr.io/linuxserver/qbittorrent:latest
+    container_name: media-qbittorrent
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=${TZ:-Europe/Moscow}
+      - WEBUI_PORT=8080
+    volumes:
+      - ./config/qbittorrent:/config
+      - ./downloads:/downloads
+    ports:
+      - "8080:8080"
+      - "6881:6881"
+      - "6881:6881/udp"
+    restart: unless-stopped
+    networks:
+      - media
+
+  jellyfin:
+    image: jellyfin/jellyfin:latest
+    container_name: media-jellyfin
+    volumes:
+      - ./config/jellyfin:/config
+      - ./config/jellyfin/cache:/cache
+      - ./downloads:/media:ro
+    ports:
+      - "8096:8096"
+    restart: unless-stopped
+    networks:
+      - media
+
+  bot:
+    build: ./bot
+    container_name: media-bot
+    environment:
+      - Bot__Token=${TELEGRAM_BOT_TOKEN}
+      - Bot__AllowedChatIds__0=${ALLOWED_CHAT_IDS}
+      - QBittorrent__BaseUrl=http://qbittorrent:8080
+      - QBittorrent__Username=${QBITTORRENT_USERNAME:-admin}
+      - QBittorrent__Password=${QBITTORRENT_PASSWORD}
+      - Jellyfin__BaseUrl=http://jellyfin:8096
+      - Jellyfin__ApiKey=${JELLYFIN_API_KEY}
+      - Jellyfin__PublicUrl=${JELLYFIN_PUBLIC_URL}
+      - Jackett__BaseUrl=http://jackett:9117
+      - Jackett__ApiKey=${JACKETT_API_KEY}
+      - Search__MaxFileSizeGb=${SEARCH_MAX_FILE_SIZE_GB:-10}
+      - Search__ExcludeKeywords=${SEARCH_EXCLUDE_KEYWORDS:-remux,bdremux,2160p}
+    volumes:
+      - ./downloads:/downloads
+    depends_on:
+      - jackett
+      - qbittorrent
+      - jellyfin
+    restart: unless-stopped
+    networks:
+      - media
+
+networks:
+  media:
+    driver: bridge
+
+volumes: {}
