@@ -14,6 +14,10 @@ config/qbittorrent/
 .DS_Store
 Thumbs.db
 
+# Secrets
+.env
+passwords.txt
+
 # Misc
 *.odt
 .~lock.*

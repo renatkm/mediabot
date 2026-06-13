@@ -4,6 +4,7 @@ public class BotConfig
 {
     public required string Token { get; set; }
     public List<long> AllowedChatIds { get; set; } = [];
+    public string InviteCode { get; set; } = "";
 }
 
 public class QBittorrentConfig

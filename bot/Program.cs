@@ -43,6 +43,7 @@ builder.Services.AddSingleton<TorrentAggregator>();
 builder.Services.AddHttpClient<QBittorrentService>();
 builder.Services.AddHttpClient<JellyfinService>();
 builder.Services.AddSingleton<BotStateService>();
+builder.Services.AddSingleton<UserRegistryService>();
 
 // Background services
 builder.Services.AddSingleton<DownloadMonitorService>();

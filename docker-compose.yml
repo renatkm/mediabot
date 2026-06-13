@@ -23,7 +23,7 @@ services:
       - TZ=${TZ:-Europe/Moscow}
     volumes:
       - ./config/jackett:/config
-      - ./downloads:/downloads
+      - /media/renat/disk512/Media:/downloads
     ports:
       - "9117:9117"
     restart: unless-stopped
@@ -40,7 +40,7 @@ services:
       - WEBUI_PORT=8080
     volumes:
       - ./config/qbittorrent:/config
-      - ./downloads:/downloads
+      - /media/renat/disk512/Media:/downloads
     ports:
       - "8080:8080"
       - "6881:6881"
@@ -55,7 +55,7 @@ services:
     volumes:
       - ./config/jellyfin:/config
       - ./config/jellyfin/cache:/cache
-      - ./downloads:/media:ro
+      - /media/renat/disk512/Media:/media:ro
     ports:
       - "8096:8096"
     restart: unless-stopped
@@ -67,7 +67,6 @@ services:
     container_name: media-bot
     environment:
       - Bot__Token=${TELEGRAM_BOT_TOKEN}
-      - Bot__AllowedChatIds__0=${ALLOWED_CHAT_IDS}
       - QBittorrent__BaseUrl=http://qbittorrent:8080
       - QBittorrent__Username=${QBITTORRENT_USERNAME:-admin}
       - QBittorrent__Password=${QBITTORRENT_PASSWORD}
@@ -78,8 +77,10 @@ services:
       - Jackett__ApiKey=${JACKETT_API_KEY}
       - Search__MaxFileSizeGb=${SEARCH_MAX_FILE_SIZE_GB:-10}
       - Search__ExcludeKeywords=${SEARCH_EXCLUDE_KEYWORDS:-remux,bdremux,2160p}
+      - Bot__InviteCode=${INVITE_CODE}
     volumes:
-      - ./downloads:/downloads
+      - ./config/bot:/config
+      - /media/renat/disk512/Media:/downloads
     depends_on:
       - jackett
       - qbittorrent

@@ -5,6 +5,13 @@ namespace MediaBot.Services;
 
 public class BotStateService
 {
+    // chatId -> pending command awaiting text input ("search" or "find")
+    private readonly ConcurrentDictionary<long, string> _pendingInput = new();
+
+    public void SetPendingInput(long chatId, string command) => _pendingInput[chatId] = command;
+    public string? ConsumePendingInput(long chatId)
+        => _pendingInput.TryRemove(chatId, out var cmd) ? cmd : null;
+
     // chatId -> search results (for torrent selection)
     private readonly ConcurrentDictionary<long, List<SearchResult>> _searchCache = new();
 
@@ -35,6 +42,9 @@ public class BotStateService
 
     public DownloadContext? GetDownloadContext(long chatId)
         => _downloadContexts.TryGetValue(chatId, out var ctx) ? ctx : null;
+
+    public DownloadContext? ConsumeDownloadContext(long chatId)
+        => _downloadContexts.TryRemove(chatId, out var ctx) ? ctx : null;
 
     public void RegisterPendingNotification(string hash, long chatId, string name)
     {

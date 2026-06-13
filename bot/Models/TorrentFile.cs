@@ -5,7 +5,8 @@ namespace MediaBot.Models;
 public record TorrentFile(
     [property: JsonPropertyName("index")] int Index,
     [property: JsonPropertyName("name")] string Name,
-    [property: JsonPropertyName("size")] long Size
+    [property: JsonPropertyName("size")] long Size,
+    [property: JsonPropertyName("priority")] int Priority
 )
 {
     public string FormattedSize => Size switch

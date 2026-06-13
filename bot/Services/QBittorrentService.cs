@@ -67,7 +67,7 @@ public class QBittorrentService
         {
             var multipart = new MultipartFormDataContent();
             multipart.Add(new ByteArrayContent(torrentBytes), "torrents", "file.torrent");
-            multipart.Add(new StringContent("true"), "paused");
+            multipart.Add(new StringContent("true"), "stopped");  // qBittorrent 5.x renamed paused→stopped
             multipart.Add(new StringContent("/downloads"), "savepath");
             content = multipart;
         }
@@ -77,7 +77,7 @@ public class QBittorrentService
             {
                 new KeyValuePair<string, string>("urls", magnetLink!),
                 new KeyValuePair<string, string>("savepath", "/downloads"),
-                new KeyValuePair<string, string>("paused", "true"),
+                new KeyValuePair<string, string>("stopped", "true"),  // qBittorrent 5.x renamed paused→stopped
             });
         }
 
@@ -142,18 +142,23 @@ public class QBittorrentService
     {
         await EnsureLoggedInAsync(ct);
 
-        var priorities = Enumerable.Range(0, totalFiles)
-            .Select(i => enabledIndexes.Contains(i) ? "1" : "0")
-            .ToArray();
+        var allIds = string.Join("|", Enumerable.Range(0, totalFiles));
+        var selectedIds = string.Join("|", enabledIndexes);
 
-        var content = new FormUrlEncodedContent(new[]
+        // Two calls: skip everything, then enable only the selected files
+        await _http.PostAsync("/api/v2/torrents/filePrio", new FormUrlEncodedContent(new[]
         {
             new KeyValuePair<string, string>("hash", hash),
-            new KeyValuePair<string, string>("id", string.Join("|", Enumerable.Range(0, totalFiles))),
-            new KeyValuePair<string, string>("priority", string.Join("|", priorities)),
-        });
+            new KeyValuePair<string, string>("id", allIds),
+            new KeyValuePair<string, string>("priority", "0"),
+        }), ct);
 
-        await _http.PostAsync("/api/v2/torrents/filePrio", content, ct);
+        await _http.PostAsync("/api/v2/torrents/filePrio", new FormUrlEncodedContent(new[]
+        {
+            new KeyValuePair<string, string>("hash", hash),
+            new KeyValuePair<string, string>("id", selectedIds),
+            new KeyValuePair<string, string>("priority", "1"),
+        }), ct);
     }
 
     public async Task ResumeAsync(string hash, CancellationToken ct = default)
@@ -163,7 +168,7 @@ public class QBittorrentService
         {
             new KeyValuePair<string, string>("hashes", hash),
         });
-        await _http.PostAsync("/api/v2/torrents/resume", content, ct);
+        await _http.PostAsync("/api/v2/torrents/start", content, ct);
     }
 
     public async Task DeleteAsync(string hash, bool deleteFiles = false, CancellationToken ct = default)
