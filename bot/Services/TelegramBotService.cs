@@ -111,23 +111,35 @@ public class TelegramBotService : BackgroundService
                 await HandleSearchCommand(chatId, text[8..].Trim());
             else if (text.Equals("/find", StringComparison.OrdinalIgnoreCase))
             {
-                _state.SetPendingInput(chatId, "find");
-                await _bot.SendMessage(chatId, "🎬 Введите название для поиска в библиотеке:");
+                if (await RequireFullAsync(chatId))
+                {
+                    _state.SetPendingInput(chatId, "find");
+                    await _bot.SendMessage(chatId, "🎬 Введите название для поиска в библиотеке:");
+                }
             }
             else if (text.StartsWith("/find ", StringComparison.OrdinalIgnoreCase))
-                await HandleFindCommand(chatId, text[6..].Trim());
+            {
+                if (await RequireFullAsync(chatId))
+                    await HandleFindCommand(chatId, text[6..].Trim());
+            }
             else if (text == "/library")
-                await HandleLibraryCommand(chatId);
+            {
+                if (await RequireFullAsync(chatId))
+                    await HandleLibraryCommand(chatId);
+            }
             else if (text == "/downloads")
-                await HandleDownloadsCommand(chatId);
+            {
+                if (await RequireFullAsync(chatId))
+                    await HandleDownloadsCommand(chatId);
+            }
             else
             {
                 var pending = _state.ConsumePendingInput(chatId);
                 if (pending == "search")
                     await HandleSearchCommand(chatId, text);
-                else if (pending == "find")
+                else if (pending == "find" && await RequireFullAsync(chatId))
                     await HandleFindCommand(chatId, text);
-                else
+                else if (pending != "find")
                     await _bot.SendMessage(chatId, "Используйте /help для списка команд.");
             }
         }
@@ -166,20 +178,39 @@ public class TelegramBotService : BackgroundService
 
         await _bot.AnswerCallbackQuery(callback.Id);
 
+        // Search navigation and grabbing the .torrent file are open to everyone;
+        // anything that downloads to or streams from the server requires full access.
         if (data.StartsWith("src:"))
             await HandleSourceSelected(chatId, callback.Message.MessageId, data);
         else if (data.StartsWith("page:"))
             await HandlePageSelected(chatId, callback.Message.MessageId, data);
+        else if (data.StartsWith("getfile:"))
+            await HandleGetTorrentFile(chatId, data);
         else if (data.StartsWith("torrent:"))
-            await HandleTorrentSelected(chatId, callback.Message.MessageId, data);
+        {
+            if (await RequireFullAsync(chatId))
+                await HandleTorrentSelected(chatId, callback.Message.MessageId, data);
+        }
         else if (data.StartsWith("file:"))
-            await HandleFileSelected(chatId, callback.Message.MessageId, data);
+        {
+            if (await RequireFullAsync(chatId))
+                await HandleFileSelected(chatId, callback.Message.MessageId, data);
+        }
         else if (data.StartsWith("play:"))
-            await HandlePlaySelected(chatId, data);
+        {
+            if (await RequireFullAsync(chatId))
+                await HandlePlaySelected(chatId, data);
+        }
         else if (data.StartsWith("moreeps:"))
-            await HandleMoreEpisodesSelected(chatId, callback.Message.MessageId, data);
+        {
+            if (await RequireFullAsync(chatId))
+                await HandleMoreEpisodesSelected(chatId, callback.Message.MessageId, data);
+        }
         else if (data.StartsWith("morefile:"))
-            await HandleMoreFileSelected(chatId, callback.Message.MessageId, data);
+        {
+            if (await RequireFullAsync(chatId))
+                await HandleMoreFileSelected(chatId, callback.Message.MessageId, data);
+        }
     }
 
     // ── Commands ─────────────────────────────────────────────────────────
@@ -194,29 +225,51 @@ public class TelegramBotService : BackgroundService
             return;
         }
 
-        if (string.IsNullOrEmpty(_config.InviteCode) || code != _config.InviteCode)
+        if (!string.IsNullOrEmpty(_config.InviteCode) && code == _config.InviteCode)
+        {
+            _registry.Register(chatId, UserRegistryService.RoleFull);
+            _logger.LogInformation("New full user registered: {ChatId}", chatId);
+            await HandleHelp(chatId);
+        }
+        else if (!string.IsNullOrEmpty(_config.GuestInviteCode) && code == _config.GuestInviteCode)
+        {
+            _registry.Register(chatId, UserRegistryService.RoleGuest);
+            _logger.LogInformation("New guest user registered: {ChatId}", chatId);
+            await HandleHelp(chatId);
+        }
+        else
         {
             await _bot.SendMessage(chatId,
                 "👋 Привет! Для доступа к боту введите:\n/start <код приглашения>");
-            return;
         }
-
-        _registry.Register(chatId);
-        _logger.LogInformation("New user registered: {ChatId}", chatId);
-        await HandleHelp(chatId);
     }
 
     private async Task HandleHelp(long chatId)
     {
-        var text = """
-            🎬 <b>MediaBot</b> — ваш личный кинотеатр
+        string text;
+        if (IsFullUser(chatId))
+        {
+            text = """
+                🎬 <b>MediaBot</b> — ваш личный кинотеатр
 
-            Команды:
-            /search &lt;запрос&gt; — поиск в торрентах
-            /find &lt;запрос&gt; — поиск в вашей библиотеке
-            /library — последние добавленные
-            /downloads — текущие загрузки
-            """;
+                Команды:
+                /search &lt;запрос&gt; — поиск в торрентах
+                /find &lt;запрос&gt; — поиск в вашей библиотеке
+                /library — последние добавленные
+                /downloads — текущие загрузки
+                """;
+        }
+        else
+        {
+            text = """
+                🎬 <b>MediaBot</b> — поиск торрентов
+
+                Команды:
+                /search &lt;запрос&gt; — поиск торрентов
+
+                После поиска нажмите 📎, чтобы получить .torrent файл.
+                """;
+        }
         await _bot.SendMessage(chatId, text, parseMode: ParseMode.Html);
     }
 
@@ -228,16 +281,19 @@ public class TelegramBotService : BackgroundService
             return;
         }
 
+        // Store the query in state so it stays out of callback_data (Telegram caps that at 64 bytes)
+        _state.SetPendingQuery(chatId, query);
+
         var indexerNames = _aggregator.IndexerNames;
         var rows = new List<InlineKeyboardButton[]>
         {
-            new[] { InlineKeyboardButton.WithCallbackData("🌍 Все источники", $"src:ALL:{query}") }
+            new[] { InlineKeyboardButton.WithCallbackData("🌍 Все источники", "src:ALL") }
         };
 
         var indexerRow = new List<InlineKeyboardButton>();
         foreach (var name in indexerNames)
         {
-            indexerRow.Add(InlineKeyboardButton.WithCallbackData(name, $"src:{name}:{query}"));
+            indexerRow.Add(InlineKeyboardButton.WithCallbackData(name, $"src:{name}"));
             if (indexerRow.Count == 2)
             {
                 rows.Add(indexerRow.ToArray());
@@ -369,12 +425,23 @@ public class TelegramBotService : BackgroundService
 
     private async Task HandleSourceSelected(long chatId, int msgId, string data)
     {
-        // data = "src:SOURCENAME:query"
-        var parts = data.Split(':', 3);
-        if (parts.Length < 3) return;
+        // data = "src:SOURCENAME"; the query is held in state
+        var parts = data.Split(':', 2);
+        if (parts.Length < 2) return;
 
         var source = parts[1];
-        var query = parts[2];
+        var query = _state.GetPendingQuery(chatId);
+
+        if (string.IsNullOrEmpty(query))
+        {
+            await _bot.EditMessageText(chatId, msgId,
+                "Сессия устарела. Выполните поиск заново через /search.",
+                parseMode: ParseMode.Html);
+            return;
+        }
+
+        _logger.LogInformation("Search request: chatId={ChatId} role={Role} source={Source} query=\"{Query}\"",
+            chatId, _registry.GetRole(chatId) ?? "admin", source, query);
 
         await _bot.EditMessageText(chatId, msgId,
             $"⏳ Ищу <b>{HtmlEscape(query)}</b> в {HtmlEscape(source)}...",
@@ -383,6 +450,9 @@ public class TelegramBotService : BackgroundService
         var results = await _aggregator.SearchAsync(
             query,
             source == "ALL" ? null : source);
+
+        _logger.LogInformation("Search result: chatId={ChatId} query=\"{Query}\" found={Count}",
+            chatId, query, results.Count);
 
         if (results.Count == 0)
         {
@@ -494,6 +564,82 @@ public class TelegramBotService : BackgroundService
             $"<b>{HtmlEscape(result.Title)}</b>\n\nВыберите что скачать:",
             parseMode: ParseMode.Html,
             replyMarkup: new InlineKeyboardMarkup(fileButtons));
+    }
+
+    private async Task HandleGetTorrentFile(long chatId, string data)
+    {
+        // data = "getfile:INDEX"
+        var idx = int.Parse(data.Split(':')[1]);
+        var result = _state.GetSearchResult(chatId, idx);
+
+        if (result == null)
+        {
+            await SafeSendAsync(chatId, "Сессия устарела. Выполните поиск заново.");
+            return;
+        }
+
+        if (result.TorrentUrl != null)
+        {
+            try
+            {
+                using var httpClient = new HttpClient();
+                var bytes = await httpClient.GetByteArrayAsync(result.TorrentUrl);
+
+                // Some indexers return a magnet redirect instead of a .torrent payload
+                if (bytes.Length < 50 || !LooksLikeTorrentFile(bytes))
+                {
+                    if (result.MagnetLink != null)
+                    {
+                        await SendMagnetLink(chatId, result);
+                        return;
+                    }
+                    await SafeSendAsync(chatId, "❌ Не удалось получить .torrent файл.");
+                    return;
+                }
+
+                var fileName = SanitizeFileName(result.Title) + ".torrent";
+                using var stream = new MemoryStream(bytes);
+                await _bot.SendDocument(
+                    chatId,
+                    InputFile.FromStream(stream, fileName),
+                    caption: $"📎 <b>{HtmlEscape(result.Title)}</b>",
+                    parseMode: ParseMode.Html);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to fetch torrent file");
+                if (result.MagnetLink != null)
+                    await SendMagnetLink(chatId, result);
+                else
+                    await SafeSendAsync(chatId, "❌ Не удалось получить .torrent файл.");
+            }
+        }
+        else if (result.MagnetLink != null)
+        {
+            await SendMagnetLink(chatId, result);
+        }
+        else
+        {
+            await SafeSendAsync(chatId, "❌ Нет ссылки для скачивания.");
+        }
+    }
+
+    private async Task SendMagnetLink(long chatId, SearchResult result)
+    {
+        await _bot.SendMessage(
+            chatId,
+            $"🧲 <b>{HtmlEscape(result.Title)}</b>\n\n<code>{HtmlEscape(result.MagnetLink!)}</code>",
+            parseMode: ParseMode.Html);
+    }
+
+    private static bool LooksLikeTorrentFile(byte[] bytes)
+        => bytes.Length > 0 && bytes[0] == (byte)'d';  // bencoded dictionaries start with 'd'
+
+    private static string SanitizeFileName(string name)
+    {
+        var invalid = Path.GetInvalidFileNameChars();
+        var clean = new string(name.Select(c => invalid.Contains(c) ? '_' : c).ToArray());
+        return clean.Length > 100 ? clean[..100] : clean;
     }
 
     private async Task HandleFileSelected(long chatId, int msgId, string data)
@@ -614,10 +760,15 @@ public class TelegramBotService : BackgroundService
             lines.AppendLine($"<b>{i + 1}.</b> {HtmlEscape(r.Title)}");
             lines.AppendLine($"   📦 {r.FormattedSize} | 🌱 {r.Seeders} | {r.Indexer}\n");
         }
+        lines.AppendLine("⬇️ — скачать через qBittorrent · 📎 — получить .torrent файл");
 
-        // Number buttons for items on this page
+        // Number buttons add to qBittorrent; 📎 buttons send the .torrent file to Telegram
         var numberRow = pageResults.Select((_, i) =>
-            InlineKeyboardButton.WithCallbackData($"{i + 1}", $"torrent:{page * PageSize + i}")
+            InlineKeyboardButton.WithCallbackData($"⬇️ {i + 1}", $"torrent:{page * PageSize + i}")
+        ).ToList();
+
+        var fileRow = pageResults.Select((_, i) =>
+            InlineKeyboardButton.WithCallbackData($"📎 {i + 1}", $"getfile:{page * PageSize + i}")
         ).ToList();
 
         // Prev / Next navigation
@@ -627,7 +778,7 @@ public class TelegramBotService : BackgroundService
         if (page < totalPages - 1)
             navRow.Add(InlineKeyboardButton.WithCallbackData("Вперёд →", $"page:{page + 1}"));
 
-        var rows = new List<IEnumerable<InlineKeyboardButton>> { numberRow };
+        var rows = new List<IEnumerable<InlineKeyboardButton>> { numberRow, fileRow };
         if (navRow.Count > 0) rows.Add(navRow);
 
         await _bot.EditMessageText(
@@ -656,8 +807,28 @@ public class TelegramBotService : BackgroundService
     {
         if (_registry.IsRegistered(chatId)) return true;
         if (_config.AllowedChatIds.Contains(chatId)) return true;
-        // Open access only when neither invite code nor static list is configured
-        return string.IsNullOrEmpty(_config.InviteCode) && _config.AllowedChatIds.Count == 0;
+        return IsOpenAccess();
+    }
+
+    // Full users can download to the server; guests can only search and grab .torrent files
+    private bool IsFullUser(long chatId)
+    {
+        if (_config.AllowedChatIds.Contains(chatId)) return true;
+        if (_registry.IsFull(chatId)) return true;
+        return IsOpenAccess();
+    }
+
+    // No access control configured at all → everyone is treated as a full user
+    private bool IsOpenAccess()
+        => string.IsNullOrEmpty(_config.InviteCode)
+        && string.IsNullOrEmpty(_config.GuestInviteCode)
+        && _config.AllowedChatIds.Count == 0;
+
+    private async Task<bool> RequireFullAsync(long chatId)
+    {
+        if (IsFullUser(chatId)) return true;
+        await SafeSendAsync(chatId, "⛔ Эта функция доступна только для полного доступа.");
+        return false;
     }
 
     private static bool IsVideoFile(string name)

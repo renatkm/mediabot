@@ -12,6 +12,13 @@ public class BotStateService
     public string? ConsumePendingInput(long chatId)
         => _pendingInput.TryRemove(chatId, out var cmd) ? cmd : null;
 
+    // chatId -> pending search query (referenced by source buttons; keeps query out of callback_data)
+    private readonly ConcurrentDictionary<long, string> _pendingQuery = new();
+
+    public void SetPendingQuery(long chatId, string query) => _pendingQuery[chatId] = query;
+    public string? GetPendingQuery(long chatId)
+        => _pendingQuery.TryGetValue(chatId, out var q) ? q : null;
+
     // chatId -> search results (for torrent selection)
     private readonly ConcurrentDictionary<long, List<SearchResult>> _searchCache = new();
 

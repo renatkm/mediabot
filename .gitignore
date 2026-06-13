@@ -9,6 +9,7 @@ downloads/
 config/jackett/
 config/jellyfin/
 config/qbittorrent/
+config/bot/
 
 # OS
 .DS_Store

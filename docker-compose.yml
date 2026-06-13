@@ -78,6 +78,7 @@ services:
       - Search__MaxFileSizeGb=${SEARCH_MAX_FILE_SIZE_GB:-10}
       - Search__ExcludeKeywords=${SEARCH_EXCLUDE_KEYWORDS:-remux,bdremux,2160p}
       - Bot__InviteCode=${INVITE_CODE}
+      - Bot__GuestInviteCode=${GUEST_INVITE_CODE}
     volumes:
       - ./config/bot:/config
       - /media/renat/disk512/Media:/downloads
