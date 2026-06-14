@@ -18,6 +18,7 @@ public class TelegramBotService : BackgroundService
     private readonly BotStateService _state;
     private readonly DownloadMonitorService _monitor;
     private readonly UserRegistryService _registry;
+    private readonly CategoryService _categories;
     private readonly ILogger<TelegramBotService> _logger;
     private TelegramBotClient _bot = null!;
 
@@ -29,6 +30,7 @@ public class TelegramBotService : BackgroundService
         BotStateService state,
         DownloadMonitorService monitor,
         UserRegistryService registry,
+        CategoryService categories,
         ILogger<TelegramBotService> logger)
     {
         _config = config.Value;
@@ -38,6 +40,7 @@ public class TelegramBotService : BackgroundService
         _state = state;
         _monitor = monitor;
         _registry = registry;
+        _categories = categories;
         _logger = logger;
     }
 
@@ -55,8 +58,13 @@ public class TelegramBotService : BackgroundService
             new BotCommand { Command = "find",      Description = "Найти в библиотеке Jellyfin" },
             new BotCommand { Command = "library",   Description = "Последние добавленные" },
             new BotCommand { Command = "downloads", Description = "Текущие загрузки" },
+            new BotCommand { Command = "ebooks",    Description = "Электронные книги" },
             new BotCommand { Command = "help",      Description = "Помощь" },
         ], cancellationToken: ct);
+
+        // Scan available download categories at startup
+        _categories.ScanCategories();
+        _logger.LogInformation("Scanned categories: {Categories}", string.Join(", ", _categories.GetCategories().Keys));
 
         _bot.OnError += OnError;
         _bot.OnMessage += OnMessage;
@@ -92,8 +100,8 @@ public class TelegramBotService : BackgroundService
 
         try
         {
-            // If user sends any command while a torrent is awaiting file selection, abandon it
-            if (text.StartsWith('/'))
+            // If user sends a command while file selection is pending, clean up the abandoned torrent
+            if (text.StartsWith('/') && !text.StartsWith("/start"))
             {
                 var abandoned = _state.ConsumeDownloadContext(chatId);
                 if (abandoned != null)
@@ -131,6 +139,11 @@ public class TelegramBotService : BackgroundService
             {
                 if (await RequireFullAsync(chatId))
                     await HandleDownloadsCommand(chatId);
+            }
+            else if (text == "/ebooks")
+            {
+                if (await RequireFullAsync(chatId))
+                    await HandleEbooksCommand(chatId);
             }
             else
             {
@@ -191,10 +204,20 @@ public class TelegramBotService : BackgroundService
             if (await RequireFullAsync(chatId))
                 await HandleTorrentSelected(chatId, callback.Message.MessageId, data);
         }
+        else if (data.StartsWith("category:"))
+        {
+            if (await RequireFullAsync(chatId))
+                await HandleCategorySelected(chatId, callback.Message.MessageId, data);
+        }
         else if (data.StartsWith("file:"))
         {
             if (await RequireFullAsync(chatId))
                 await HandleFileSelected(chatId, callback.Message.MessageId, data);
+        }
+        else if (data.StartsWith("filepage:"))
+        {
+            if (await RequireFullAsync(chatId))
+                await HandleFilePageSelected(chatId, callback.Message.MessageId, data);
         }
         else if (data.StartsWith("play:"))
         {
@@ -210,6 +233,11 @@ public class TelegramBotService : BackgroundService
         {
             if (await RequireFullAsync(chatId))
                 await HandleMoreFileSelected(chatId, callback.Message.MessageId, data);
+        }
+        else if (data.StartsWith("ebook:"))
+        {
+            if (await RequireFullAsync(chatId))
+                await HandleEbookSelected(chatId, data);
         }
     }
 
@@ -257,6 +285,7 @@ public class TelegramBotService : BackgroundService
                 /find &lt;запрос&gt; — поиск в вашей библиотеке
                 /library — последние добавленные
                 /downloads — текущие загрузки
+                /ebooks — электронные книги
                 """;
         }
         else
@@ -421,6 +450,77 @@ public class TelegramBotService : BackgroundService
         await _bot.SendMessage(chatId, lines.ToString().TrimEnd(), parseMode: ParseMode.Html, replyMarkup: markup);
     }
 
+    private async Task HandleEbooksCommand(long chatId)
+    {
+        var downloadDir = "/downloads";
+        var ebookExtensions = new[] { ".pdf", ".epub", ".mobi", ".azw", ".azw3" };
+
+        try
+        {
+            var files = Directory.GetFiles(downloadDir, "*", SearchOption.AllDirectories)
+                .Where(f => ebookExtensions.Contains(Path.GetExtension(f).ToLowerInvariant()))
+                .OrderBy(f => Path.GetFileName(f))
+                .ToList();
+
+            if (files.Count == 0)
+            {
+                await SafeSendAsync(chatId, "📚 Нет файлов электронных книг в библиотеке.");
+                return;
+            }
+
+            var buttons = files.Select((file, idx) =>
+                new[] { InlineKeyboardButton.WithCallbackData(
+                    $"📄 {Path.GetFileName(file)}",
+                    $"ebook:{idx}") }
+            ).ToList();
+
+            await _bot.SendMessage(
+                chatId,
+                $"📚 <b>Электронные книги ({files.Count})</b>\n\nВыберите файл для скачивания:",
+                parseMode: ParseMode.Html,
+                replyMarkup: new InlineKeyboardMarkup(buttons));
+
+            _state.SetEbookFiles(chatId, files);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error listing ebooks");
+            await SafeSendAsync(chatId, "❌ Ошибка при чтении библиотеки.");
+        }
+    }
+
+    private async Task HandleEbookSelected(long chatId, string data)
+    {
+        var idx = int.Parse(data.Split(':')[1]);
+        var files = _state.GetEbookFiles(chatId);
+
+        if (files == null || idx >= files.Count)
+        {
+            await SafeSendAsync(chatId, "Сессия устарела. Используйте /ebooks снова.");
+            return;
+        }
+
+        var filePath = files[idx];
+        var fileName = Path.GetFileName(filePath);
+
+        try
+        {
+            using var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read);
+            await _bot.SendDocument(
+                chatId,
+                InputFile.FromStream(stream, fileName),
+                caption: $"📚 <b>{HtmlEscape(fileName)}</b>",
+                parseMode: ParseMode.Html);
+
+            _logger.LogInformation("Ebook sent: chatId={ChatId} file={FileName}", chatId, fileName);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to send ebook {File} to {ChatId}", filePath, chatId);
+            await SafeSendAsync(chatId, "❌ Не удалось отправить файл.");
+        }
+    }
+
     // ── Callback handlers ─────────────────────────────────────────────────
 
     private async Task HandleSourceSelected(long chatId, int msgId, string data)
@@ -479,6 +579,38 @@ public class TelegramBotService : BackgroundService
             return;
         }
 
+        // Ask for category before adding torrent - use dynamic categories from disk
+        var availableCategories = _categories.GetCategories();
+        var categoryButtons = availableCategories.Select(kvp =>
+            new[] { InlineKeyboardButton.WithCallbackData(kvp.Value, $"category:{kvp.Key}:{idx}") }
+        ).ToArray();
+
+        await _bot.EditMessageText(
+            chatId, msgId,
+            $"<b>{HtmlEscape(result.Title)}</b>\n\nВыберите категорию:",
+            parseMode: ParseMode.Html,
+            replyMarkup: new InlineKeyboardMarkup(categoryButtons));
+    }
+
+    private async Task HandleCategorySelected(long chatId, int msgId, string data)
+    {
+        // data = "category:TYPE:INDEX"
+        var parts = data.Split(':', 3);
+        var category = parts[1];
+        var idx = int.Parse(parts[2]);
+
+        var result = _state.GetSearchResult(chatId, idx);
+        if (result == null)
+        {
+            await SafeSendAsync(chatId, "Сессия устарела. Выполните поиск заново.");
+            return;
+        }
+
+        // If user selects a different torrent while one is pending, clean up the old one
+        var abandoned = _state.ConsumeDownloadContext(chatId);
+        if (abandoned != null)
+            await _qbit.DeleteAsync(abandoned.Hash, deleteFiles: false);
+
         await _bot.EditMessageText(chatId, msgId,
             $"⏳ Добавляю <b>{HtmlEscape(result.Title)}</b> и получаю список файлов...",
             parseMode: ParseMode.Html);
@@ -526,44 +658,50 @@ public class TelegramBotService : BackgroundService
             Hash = hash,
             AllFiles = files,
             VideoFiles = videoFiles,
-            TorrentName = result.Title
+            TorrentName = result.Title,
+            Category = category
         };
         _state.SetDownloadContext(chatId, ctx);
 
         if (videoFiles.Count == 0)
         {
-            await _qbit.ResumeAsync(hash);
-            _state.RegisterPendingNotification(hash, chatId, result.Title);
-            await _bot.EditMessageText(chatId, msgId,
-                $"✅ <b>{HtmlEscape(result.Title)}</b> поставлен на скачку. Уведомлю когда готово!",
-                parseMode: ParseMode.Html);
+            await StartDownload(chatId, msgId, ctx, null);
             return;
         }
 
         if (videoFiles.Count == 1)
         {
-            await _qbit.SetFilePrioritiesAsync(hash, new[] { videoFiles[0].Index }, files.Count);
-            await _qbit.ResumeAsync(hash);
-            _state.RegisterPendingNotification(hash, chatId, result.Title);
-            await _bot.EditMessageText(chatId, msgId,
-                $"✅ Скачиваю <b>{HtmlEscape(result.Title)}</b>. Уведомлю когда готово!",
-                parseMode: ParseMode.Html);
+            await StartDownload(chatId, msgId, ctx, new[] { videoFiles[0].Index });
             return;
         }
 
-        var fileButtons = videoFiles.Select(f =>
-            new[] { InlineKeyboardButton.WithCallbackData(
-                $"📺 {Path.GetFileName(f.Name)} ({f.FormattedSize})",
-                $"file:{f.Index}") }
-        ).ToList();
+        await ShowFilesPage(chatId, msgId, result.Title, videoFiles, 0);
+    }
 
-        fileButtons.Add(new[] { InlineKeyboardButton.WithCallbackData("📦 Скачать всё", "file:ALL") });
+    private async Task StartDownload(long chatId, int msgId, DownloadContext ctx, int[]? enabledIndexes)
+    {
+        if (enabledIndexes != null && enabledIndexes.Length > 0)
+            await _qbit.SetFilePrioritiesAsync(ctx.Hash, enabledIndexes, ctx.AllFiles.Count);
 
-        await _bot.EditMessageText(
-            chatId, msgId,
-            $"<b>{HtmlEscape(result.Title)}</b>\n\nВыберите что скачать:",
-            parseMode: ParseMode.Html,
-            replyMarkup: new InlineKeyboardMarkup(fileButtons));
+        // Move torrent to category folder
+        var savePath = GetCategoryPath(ctx.Category, ctx.TorrentName);
+        await _qbit.MoveTorrentAsync(ctx.Hash, savePath);
+
+        await _qbit.ResumeAsync(ctx.Hash);
+        _state.RegisterPendingNotification(ctx.Hash, chatId, ctx.TorrentName!);
+        _state.ConsumeDownloadContext(chatId);
+
+        await _bot.EditMessageText(chatId, msgId,
+            $"✅ Скачиваю <b>{HtmlEscape(ctx.TorrentName ?? "торрент")}</b> в {HtmlEscape(ctx.Category ?? "other")}. Уведомлю когда готово!",
+            parseMode: ParseMode.Html);
+    }
+
+    private static string GetCategoryPath(string? category, string? torrentName)
+    {
+        var basePath = "/downloads";
+        var categoryFolder = category ?? "other";
+        var sanitized = SanitizeFileName(torrentName ?? "torrent");
+        return $"{basePath}/{categoryFolder}/{sanitized}";
     }
 
     private async Task HandleGetTorrentFile(long chatId, string data)
@@ -654,23 +792,14 @@ public class TelegramBotService : BackgroundService
             return;
         }
 
-        if (part == "ALL")
-        {
-            await _qbit.ResumeAsync(ctx.Hash);
-        }
-        else
+        int[]? enabledIndexes = null;
+        if (part != "ALL")
         {
             var fileIndex = int.Parse(part);
-            await _qbit.SetFilePrioritiesAsync(ctx.Hash, new[] { fileIndex }, ctx.AllFiles.Count);
-            await _qbit.ResumeAsync(ctx.Hash);
+            enabledIndexes = new[] { fileIndex };
         }
 
-        var name = ctx.TorrentName ?? ctx.Hash;
-        _state.RegisterPendingNotification(ctx.Hash, chatId, name);
-
-        await _bot.EditMessageText(chatId, msgId,
-            $"✅ Загрузка начата! Уведомлю когда <b>{HtmlEscape(name)}</b> будет готово.",
-            parseMode: ParseMode.Html);
+        await StartDownload(chatId, msgId, ctx, enabledIndexes);
     }
 
     private async Task HandlePlaySelected(long chatId, string data)
@@ -799,6 +928,61 @@ public class TelegramBotService : BackgroundService
             return;
         }
         await ShowResultsPage(chatId, msgId, results, page);
+    }
+
+    private async Task ShowFilesPage(long chatId, int msgId, string torrentTitle, List<TorrentFile> videoFiles, int page)
+    {
+        var totalPages = (int)Math.Ceiling(videoFiles.Count / (double)PageSize);
+        var pageFiles = videoFiles.Skip(page * PageSize).Take(PageSize).ToList();
+
+        var lines = new System.Text.StringBuilder();
+        lines.AppendLine($"<b>{HtmlEscape(torrentTitle)}</b>\n");
+        if (totalPages > 1)
+            lines.AppendLine($"📄 Файлы {page * PageSize + 1}–{page * PageSize + pageFiles.Count} из {videoFiles.Count}:\n");
+        else
+            lines.AppendLine("📄 Выберите файлы:\n");
+
+        for (int i = 0; i < pageFiles.Count; i++)
+        {
+            var f = pageFiles[i];
+            var fileName = Path.GetFileName(f.Name);
+            lines.AppendLine($"<b>{i + 1}.</b> {HtmlEscape(fileName)} ({f.FormattedSize})");
+        }
+
+        var fileButtons = pageFiles.Select((_, i) =>
+            InlineKeyboardButton.WithCallbackData($"📺 {i + 1}", $"file:{page * PageSize + i}")
+        ).ToList();
+
+        var allButton = new List<InlineKeyboardButton> { InlineKeyboardButton.WithCallbackData("📦 Скачать всё", "file:ALL") };
+
+        var navRow = new List<InlineKeyboardButton>();
+        if (page > 0)
+            navRow.Add(InlineKeyboardButton.WithCallbackData("← Назад", $"filepage:{page - 1}"));
+        if (page < totalPages - 1)
+            navRow.Add(InlineKeyboardButton.WithCallbackData("Вперёд →", $"filepage:{page + 1}"));
+
+        var rows = new List<IEnumerable<InlineKeyboardButton>> { fileButtons, allButton };
+        if (navRow.Count > 0)
+            rows.Add(navRow);
+
+        await _bot.EditMessageText(
+            chatId, msgId,
+            lines.ToString().TrimEnd(),
+            parseMode: ParseMode.Html,
+            replyMarkup: new InlineKeyboardMarkup(rows));
+    }
+
+    private async Task HandleFilePageSelected(long chatId, int msgId, string data)
+    {
+        // data = "filepage:N"
+        var page = int.Parse(data.Split(':')[1]);
+        var ctx = _state.GetDownloadContext(chatId);
+        if (ctx?.VideoFiles == null || ctx.VideoFiles.Count == 0)
+        {
+            await SafeSendAsync(chatId, "Сессия устарела. Выполните поиск заново.");
+            return;
+        }
+        await ShowFilesPage(chatId, msgId, ctx.TorrentName!, ctx.VideoFiles, page);
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────

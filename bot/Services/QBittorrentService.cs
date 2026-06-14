@@ -181,4 +181,15 @@ public class QBittorrentService
         });
         await _http.PostAsync("/api/v2/torrents/delete", content, ct);
     }
+
+    public async Task MoveTorrentAsync(string hash, string newPath, CancellationToken ct = default)
+    {
+        await EnsureLoggedInAsync(ct);
+        var content = new FormUrlEncodedContent(new[]
+        {
+            new KeyValuePair<string, string>("hashes", hash),
+            new KeyValuePair<string, string>("location", newPath),
+        });
+        await _http.PostAsync("/api/v2/torrents/setLocation", content, ct);
+    }
 }

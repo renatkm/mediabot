@@ -70,4 +70,13 @@ public class BotStateService
         }
         return false;
     }
+
+    // chatId -> list of ebook file paths (for /ebooks command)
+    private readonly ConcurrentDictionary<long, List<string>> _ebookFiles = new();
+
+    public void SetEbookFiles(long chatId, List<string> files)
+        => _ebookFiles[chatId] = files;
+
+    public List<string>? GetEbookFiles(long chatId)
+        => _ebookFiles.TryGetValue(chatId, out var files) ? files : null;
 }

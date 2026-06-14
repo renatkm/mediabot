@@ -71,13 +71,17 @@ public class JellyfinService
 
         try
         {
-            var url = $"/Items/Latest?api_key={_config.ApiKey}" +
-                      $"&IncludeItemTypes=Movie,Episode" +
+            var url = $"/Items?api_key={_config.ApiKey}" +
+                      $"&IncludeItemTypes=Movie,Episode,Series" +
+                      $"&SortBy=DateCreated" +
+                      $"&SortOrder=Descending" +
                       $"&Limit={limit}" +
-                      $"&Fields=RunTimeTicks,ProductionYear";
+                      $"&Recursive=true" +
+                      $"&Fields=Overview,RunTimeTicks,ProductionYear";
 
             var response = await _http.GetStringAsync(url, ct);
-            return JsonSerializer.Deserialize<List<JellyfinItem>>(response) ?? [];
+            var result = JsonSerializer.Deserialize<JellyfinResponse>(response);
+            return result?.Items ?? [];
         }
         catch (Exception ex)
         {
