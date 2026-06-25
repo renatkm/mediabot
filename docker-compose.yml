@@ -58,6 +58,13 @@ services:
       - /media/renat/disk512/Media:/media:ro
     ports:
       - "8096:8096"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu, video, utility]
     restart: unless-stopped
     networks:
       - media
