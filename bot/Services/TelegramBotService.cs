@@ -877,7 +877,9 @@ public class TelegramBotService : BackgroundService
         }
 
         await _qbit.ResumeAsync(hash);
-        await _bot.EditMessageText(chatId, msgId, "✅ Загрузка начата! Используйте /downloads для отслеживания.");
+        var torrentName = (await _qbit.GetTorrentsAsync()).FirstOrDefault(t => t.Hash == hash)?.Name ?? "Торрент";
+        _state.RegisterPendingNotification(hash, chatId, torrentName);
+        await _bot.EditMessageText(chatId, msgId, "✅ Загрузка начата! Уведомлю когда готово. Прогресс: /downloads");
     }
 
     // ── Pagination ────────────────────────────────────────────────────────
