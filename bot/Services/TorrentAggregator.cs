@@ -23,7 +23,7 @@ public class TorrentAggregator
 
     public IReadOnlyList<string> IndexerNames => _indexers.Select(i => i.Name).ToList();
 
-    public async Task<List<SearchResult>> SearchAsync(string query, string? indexerName = null, CancellationToken ct = default)
+    public async Task<List<SearchResult>> SearchAsync(string query, string? indexerName = null, CancellationToken ct = default, bool applyFilters = true)
     {
         var targets = indexerName == null
             ? _indexers
@@ -46,7 +46,7 @@ public class TorrentAggregator
 
         return results
             .SelectMany(r => r)
-            .Where(r => PassesFilter(r))
+            .Where(r => !applyFilters || PassesFilter(r))
             .OrderByDescending(r => r.Seeders)
             .ToList();
     }

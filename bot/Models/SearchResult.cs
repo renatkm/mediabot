@@ -5,6 +5,7 @@ public record SearchResult
     public required string Title { get; init; }
     public string? MagnetLink { get; init; }
     public string? TorrentUrl { get; init; }
+    public string? DetailsUrl { get; init; }
     public long SizeBytes { get; init; }
     public int Seeders { get; init; }
     public required string Indexer { get; init; }

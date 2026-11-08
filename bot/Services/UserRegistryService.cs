@@ -23,6 +23,8 @@ public class UserRegistryService
 
     public string? GetRole(long chatId) => _users.TryGetValue(chatId, out var role) ? role : null;
 
+    public IEnumerable<long> FullUsers => _users.Where(kv => kv.Value == RoleFull).Select(kv => kv.Key);
+
     public void Register(long chatId, string role)
     {
         _users[chatId] = role;

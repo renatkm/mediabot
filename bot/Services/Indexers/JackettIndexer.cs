@@ -59,6 +59,7 @@ public class JackettIndexer : ITorrentIndexer
                     Title = r.Title,
                     MagnetLink = r.MagnetUri,
                     TorrentUrl = r.Link,
+                    DetailsUrl = r.Details,
                     SizeBytes = r.Size,
                     Seeders = r.Seeders,
                     Indexer = Name

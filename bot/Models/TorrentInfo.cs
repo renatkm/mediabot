@@ -8,7 +8,8 @@ public record TorrentInfo(
     [property: JsonPropertyName("progress")] double Progress,
     [property: JsonPropertyName("dlspeed")] long DlSpeed,
     [property: JsonPropertyName("size")] long Size,
-    [property: JsonPropertyName("state")] string State
+    [property: JsonPropertyName("state")] string State,
+    [property: JsonPropertyName("save_path")] string SavePath
 )
 {
     public string FormattedProgress => $"{Progress * 100:F0}%";

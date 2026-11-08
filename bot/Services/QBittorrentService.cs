@@ -106,7 +106,7 @@ public class QBittorrentService
         }
     }
 
-    public async Task<string?> AddTorrentAsync(string? magnetLink = null, byte[]? torrentBytes = null, CancellationToken ct = default)
+    public async Task<string?> AddTorrentAsync(string? magnetLink = null, byte[]? torrentBytes = null, string savePath = "/downloads", CancellationToken ct = default)
     {
         await EnsureLoggedInAsync(ct);
 
@@ -120,7 +120,7 @@ public class QBittorrentService
             var multipart = new MultipartFormDataContent();
             multipart.Add(new ByteArrayContent(torrentBytes), "torrents", "file.torrent");
             multipart.Add(new StringContent("true"), "stopped");  // qBittorrent 5.x renamed paused→stopped
-            multipart.Add(new StringContent("/downloads"), "savepath");
+            multipart.Add(new StringContent(savePath), "savepath");
             content = multipart;
         }
         else
@@ -128,7 +128,7 @@ public class QBittorrentService
             content = new FormUrlEncodedContent(new[]
             {
                 new KeyValuePair<string, string>("urls", magnetLink!),
-                new KeyValuePair<string, string>("savepath", "/downloads"),
+                new KeyValuePair<string, string>("savepath", savePath),
                 new KeyValuePair<string, string>("stopped", "true"),  // qBittorrent 5.x renamed paused→stopped
             });
         }
@@ -188,6 +188,22 @@ public class QBittorrentService
         await EnsureLoggedInAsync(ct);
         var response = await _http.GetStringAsync($"/api/v2/torrents/files?hash={hash}", ct);
         return JsonSerializer.Deserialize<List<TorrentFile>>(response) ?? [];
+    }
+
+    public async Task<(string? Comment, long CreationDate)> GetPropertiesAsync(string hash, CancellationToken ct = default)
+    {
+        await EnsureLoggedInAsync(ct);
+        using var doc = JsonDocument.Parse(await _http.GetStringAsync($"/api/v2/torrents/properties?hash={hash}", ct));
+        return (doc.RootElement.GetProperty("comment").GetString(), doc.RootElement.GetProperty("creation_date").GetInt64());
+    }
+
+    // True when a tracker no longer knows this hash, which is what happens after a release is re-uploaded
+    public async Task<bool> IsUnregisteredAsync(string hash, CancellationToken ct = default)
+    {
+        await EnsureLoggedInAsync(ct);
+        using var doc = JsonDocument.Parse(await _http.GetStringAsync($"/api/v2/torrents/trackers?hash={hash}", ct));
+        return doc.RootElement.EnumerateArray().Any(t =>
+            t.GetProperty("msg").GetString()?.Contains("not registered", StringComparison.OrdinalIgnoreCase) == true);
     }
 
     public async Task SetFilePrioritiesAsync(string hash, int[] enabledIndexes, int totalFiles, CancellationToken ct = default)

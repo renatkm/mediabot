@@ -1,3 +1,4 @@
+using System.Text.Json;
 using MediaBot.Configuration;
 using MediaBot.Models;
 using Microsoft.Extensions.Options;
@@ -69,6 +70,8 @@ public class TelegramBotService : BackgroundService
         _bot.OnError += OnError;
         _bot.OnMessage += OnMessage;
         _bot.OnUpdate += OnUpdate;
+
+        _ = CheckForNewReleasesAsync(ct);
 
         await Task.Delay(Timeout.Infinite, ct);
     }
@@ -233,6 +236,11 @@ public class TelegramBotService : BackgroundService
         {
             if (await RequireFullAsync(chatId))
                 await HandleMoreFileSelected(chatId, callback.Message.MessageId, data);
+        }
+        else if (data.StartsWith("upd:"))
+        {
+            if (await RequireFullAsync(chatId))
+                await HandleReleaseUpdateSelected(chatId, callback.Message.MessageId, data);
         }
         else if (data.StartsWith("ebook:"))
         {
@@ -880,6 +888,147 @@ public class TelegramBotService : BackgroundService
         var torrentName = (await _qbit.GetTorrentsAsync()).FirstOrDefault(t => t.Hash == hash)?.Name ?? "Торрент";
         _state.RegisterPendingNotification(hash, chatId, torrentName);
         await _bot.EditMessageText(chatId, msgId, "✅ Загрузка начата! Уведомлю когда готово. Прогресс: /downloads");
+    }
+
+    // ── Updated releases ──────────────────────────────────────────────────
+
+    private const string ReleaseCheckPath = "/config/release-check.json";
+
+    private sealed record ReleaseCheckState(DateTime LastCheckUtc, HashSet<string> Notified);
+
+    // shortcut: runs only at bot startup, so a bot that is never restarted never re-checks; loop on the same gate if that matters
+    private async Task CheckForNewReleasesAsync(CancellationToken ct)
+    {
+        try
+        {
+            // qBittorrent needs time after a restart to get answers from trackers
+            await Task.Delay(TimeSpan.FromMinutes(2), ct);
+
+            var state = System.IO.File.Exists(ReleaseCheckPath)
+                ? JsonSerializer.Deserialize<ReleaseCheckState>(await System.IO.File.ReadAllTextAsync(ReleaseCheckPath, ct))!
+                : new ReleaseCheckState(DateTime.MinValue, []);
+            if (DateTime.UtcNow - state.LastCheckUtc < TimeSpan.FromDays(1)) return;
+
+            var torrents = await _qbit.GetTorrentsAsync(ct);
+            var stale = new List<(TorrentInfo Torrent, string Comment, long Created)>();
+            foreach (var torrent in torrents)
+            {
+                if (!await _qbit.IsUnregisteredAsync(torrent.Hash, ct)) continue;
+                var (comment, created) = await _qbit.GetPropertiesAsync(torrent.Hash, ct);
+                if (!string.IsNullOrEmpty(comment)) stale.Add((torrent, comment, created));
+            }
+
+            var recipients = _registry.FullUsers.Union(_config.AllowedChatIds).ToList();
+
+            // Several outdated versions of one topic must produce a single notification
+            foreach (var old in stale.GroupBy(s => s.Comment).Select(g => g.MaxBy(s => s.Created)))
+            {
+                try
+                {
+                    var release = await FindNewReleaseAsync(old.Torrent.SavePath, old.Comment, torrents, ct);
+                    if (release == null || !state.Notified.Add(release.Value.Hash)) continue;
+
+                    var markup = new InlineKeyboardMarkup(InlineKeyboardButton.WithCallbackData("📥 Обновить раздачу", $"upd:{old.Torrent.Hash}"));
+                    foreach (var chatId in recipients)
+                    {
+                        try
+                        {
+                            await _bot.SendMessage(chatId,
+                                $"🆕 Раздача обновилась:\n<b>{HtmlEscape(release.Value.Result.Title)}</b>",
+                                parseMode: ParseMode.Html, replyMarkup: markup, cancellationToken: ct);
+                        }
+                        catch (Exception ex) when (ex is not OperationCanceledException)
+                        {
+                            _logger.LogWarning(ex, "Failed to notify {ChatId} about an updated release", chatId);
+                        }
+                    }
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    _logger.LogWarning(ex, "Failed to check {Torrent} for an update", old.Torrent.Name);
+                }
+            }
+
+            await System.IO.File.WriteAllTextAsync(ReleaseCheckPath,
+                JsonSerializer.Serialize(state with { LastCheckUtc = DateTime.UtcNow }), ct);
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "New release check failed");
+        }
+    }
+
+    // Finds the current version of a tracker topic; null when there is none or it is already in qBittorrent
+    private async Task<(SearchResult Result, byte[]? Bytes, string Hash)?> FindNewReleaseAsync(
+        string savePath, string topicUrl, List<TorrentInfo> torrents, CancellationToken ct = default)
+    {
+        // Folders are named after the release title: "Name _ S1E1-2 of 8 [...]"
+        var query = Path.GetFileName(savePath.TrimEnd('/')).Split(" _ ")[0];
+        // No size/keyword filters: a season that outgrew them is still the same release
+        var results = await _aggregator.SearchAsync(query, ct: ct, applyFilters: false);
+        var result = results.FirstOrDefault(r => r.DetailsUrl == topicUrl);
+        if (result == null) return null;
+
+        byte[]? bytes = null;
+        if (result.MagnetLink == null)
+        {
+            if (result.TorrentUrl == null) return null;
+            using var httpClient = new HttpClient();
+            bytes = await httpClient.GetByteArrayAsync(result.TorrentUrl, ct);
+        }
+
+        var hash = QBittorrentService.GetInfoHash(result.MagnetLink, bytes);
+        if (hash == null || torrents.Any(t => t.Hash.Equals(hash, StringComparison.OrdinalIgnoreCase))) return null;
+        return (result, bytes, hash);
+    }
+
+    private async Task HandleReleaseUpdateSelected(long chatId, int msgId, string data)
+    {
+        var oldHash = data.Split(':', 2)[1];
+        var torrents = await _qbit.GetTorrentsAsync();
+        var old = torrents.FirstOrDefault(t => t.Hash == oldHash);
+        if (old == null)
+        {
+            await SafeSendAsync(chatId, "Эта раздача уже обновлена.");
+            return;
+        }
+
+        await _bot.EditMessageText(chatId, msgId, "⏳ Обновляю раздачу...");
+
+        var (comment, _) = await _qbit.GetPropertiesAsync(oldHash);
+        var release = string.IsNullOrEmpty(comment) ? null : await FindNewReleaseAsync(old.SavePath, comment, torrents);
+        if (release == null)
+        {
+            await SafeSendAsync(chatId, "Новая версия не найдена или уже добавлена.");
+            return;
+        }
+
+        // Must be added at the old path directly: moving it there afterwards would overwrite the existing files
+        var newHash = await _qbit.AddTorrentAsync(release.Value.Result.MagnetLink, release.Value.Bytes, old.SavePath);
+        if (newHash == null)
+        {
+            await SafeSendAsync(chatId, "❌ Торрент не появился в qBittorrent. Попробуйте снова.");
+            return;
+        }
+
+        var oldNames = (await _qbit.GetFilesAsync(oldHash)).Where(f => f.Priority > 0).Select(f => f.Name).ToHashSet();
+        var newFiles = await _qbit.GetFilesAsync(newHash);
+        var carriedOver = newFiles.Where(f => oldNames.Contains(f.Name)).Select(f => f.Index).ToArray();
+
+        if (carriedOver.Length == 0)
+        {
+            await _qbit.DeleteAsync(newHash, deleteFiles: false);
+            await SafeSendAsync(chatId, "⚠️ Файлы в новой версии названы иначе, обновить в той же папке нельзя. Скачайте её через /search.");
+            return;
+        }
+
+        await _qbit.SetFilePrioritiesAsync(newHash, carriedOver, newFiles.Count);
+        // Keeps the files on disk; the new torrent takes them over after its hash check
+        await _qbit.DeleteAsync(oldHash, deleteFiles: false);
+        await _qbit.ResumeAsync(newHash);
+
+        await HandleMoreEpisodesSelected(chatId, msgId, $"moreeps:{newHash}");
     }
 
     // ── Pagination ────────────────────────────────────────────────────────
