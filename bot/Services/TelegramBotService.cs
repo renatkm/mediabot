@@ -618,21 +618,28 @@ public class TelegramBotService : BackgroundService
         string? hash;
         try
         {
-            if (result.MagnetLink != null)
-            {
-                hash = await _qbit.AddTorrentAsync(magnetLink: result.MagnetLink);
-            }
-            else if (result.TorrentUrl != null)
-            {
-                using var httpClient = new HttpClient();
-                var bytes = await httpClient.GetByteArrayAsync(result.TorrentUrl);
-                hash = await _qbit.AddTorrentAsync(torrentBytes: bytes);
-            }
-            else
+            if (result.MagnetLink == null && result.TorrentUrl == null)
             {
                 await SafeSendAsync(chatId, "❌ Нет ссылки для скачивания.");
                 return;
             }
+
+            byte[]? bytes = null;
+            if (result.MagnetLink == null)
+            {
+                using var httpClient = new HttpClient();
+                bytes = await httpClient.GetByteArrayAsync(result.TorrentUrl);
+            }
+
+            // Already in qBittorrent: the normal flow would time out, so offer its skipped episodes
+            var infoHash = QBittorrentService.GetInfoHash(result.MagnetLink, bytes);
+            if (infoHash != null && (await _qbit.GetTorrentsAsync()).Any(t => t.Hash.Equals(infoHash, StringComparison.OrdinalIgnoreCase)))
+            {
+                await HandleMoreEpisodesSelected(chatId, msgId, $"moreeps:{infoHash}");
+                return;
+            }
+
+            hash = await _qbit.AddTorrentAsync(result.MagnetLink, bytes);
         }
         catch (Exception ex)
         {
@@ -795,8 +802,8 @@ public class TelegramBotService : BackgroundService
         int[]? enabledIndexes = null;
         if (part != "ALL")
         {
-            var fileIndex = int.Parse(part);
-            enabledIndexes = new[] { fileIndex };
+            // The button carries the position in VideoFiles, qBittorrent needs the file's own index
+            enabledIndexes = new[] { ctx.VideoFiles[int.Parse(part)].Index };
         }
 
         await StartDownload(chatId, msgId, ctx, enabledIndexes);
@@ -855,16 +862,18 @@ public class TelegramBotService : BackgroundService
         var part = parts[2];
 
         var files = await _qbit.GetFilesAsync(hash);
+        // SetFilePrioritiesAsync skips everything not listed, so keep the files already enabled
+        var enabled = files.Where(f => f.Priority > 0).Select(f => f.Index);
 
         if (part == "ALL")
         {
-            var skippedIndexes = files.Where(f => IsVideoFile(f.Name) && f.Priority == 0).Select(f => f.Index).ToArray();
-            await _qbit.SetFilePrioritiesAsync(hash, skippedIndexes, files.Count);
+            var skippedIndexes = files.Where(f => IsVideoFile(f.Name) && f.Priority == 0).Select(f => f.Index);
+            await _qbit.SetFilePrioritiesAsync(hash, enabled.Concat(skippedIndexes).ToArray(), files.Count);
         }
         else
         {
             var fileIndex = int.Parse(part);
-            await _qbit.SetFilePrioritiesAsync(hash, [fileIndex], files.Count);
+            await _qbit.SetFilePrioritiesAsync(hash, enabled.Append(fileIndex).ToArray(), files.Count);
         }
 
         await _qbit.ResumeAsync(hash);

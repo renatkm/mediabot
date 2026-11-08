@@ -1,4 +1,7 @@
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using MediaBot.Configuration;
 using MediaBot.Models;
 using Microsoft.Extensions.Options;
@@ -51,6 +54,55 @@ public class QBittorrentService
         else
         {
             throw new InvalidOperationException($"qBittorrent login failed: {body}. Check credentials or enable bypass auth in qBittorrent Settings → Web UI.");
+        }
+    }
+
+    // Returns null when the hash can't be determined; callers then just add the torrent as usual.
+    public static string? GetInfoHash(string? magnetLink, byte[]? torrentBytes)
+    {
+        if (magnetLink != null)
+        {
+            // shortcut: hex btih only, base32 magnets return null; decode base32 if they show up in practice
+            var match = Regex.Match(magnetLink, "urn:btih:([0-9a-fA-F]{40})(?![0-9a-zA-Z])");
+            return match.Success ? match.Groups[1].Value.ToLowerInvariant() : null;
+        }
+
+        if (torrentBytes == null) return null;
+
+        try
+        {
+            // The info hash is the SHA-1 of the raw bencoded "info" value
+            var i = 1;
+            while (torrentBytes[i] != 'e')
+            {
+                var valueStart = SkipBencode(torrentBytes, i);
+                var valueEnd = SkipBencode(torrentBytes, valueStart);
+                if (torrentBytes.AsSpan(i, valueStart - i).SequenceEqual("4:info"u8))
+                    return Convert.ToHexString(SHA1.HashData(torrentBytes.AsSpan(valueStart, valueEnd - valueStart))).ToLowerInvariant();
+                i = valueEnd;
+            }
+        }
+        catch (Exception ex) when (ex is IndexOutOfRangeException or ArgumentException or FormatException or OverflowException)
+        {
+            // Malformed file from the indexer: let qBittorrent reject it
+        }
+
+        return null;
+    }
+
+    private static int SkipBencode(byte[] data, int i)
+    {
+        switch ((char)data[i])
+        {
+            case 'i':
+                return Array.IndexOf(data, (byte)'e', i) + 1;
+            case 'l' or 'd':
+                i++;
+                while (data[i] != 'e') i = SkipBencode(data, i);
+                return i + 1;
+            default:
+                var colon = Array.IndexOf(data, (byte)':', i);
+                return colon + 1 + int.Parse(Encoding.ASCII.GetString(data, i, colon - i));
         }
     }
 
